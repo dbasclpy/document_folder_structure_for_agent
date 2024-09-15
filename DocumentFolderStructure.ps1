@@ -1,28 +1,28 @@
-<# 
+<#
 .SYNOPSIS
     Documents the folder structure of a repository for an LLM.
 
 .DESCRIPTION
     This script maps out the structure of the current working directory and its subdirectories,
-    considering .gitignore rules, module import tracking, and outputs the result in markdown format.
+    considering directory entries in the .gitignore file, module import tracking, and outputs the result in markdown format.
 
-.PARAMETER log
-    Enables verbose logging.
-
-.PARAMETER noignore
-    Disables .gitignore processing.
-
-.PARAMETER noimporttracking
-    Disables module import tracking.
-
-.PARAMETER outputpath
-    Specifies the output file path.
-
-.PARAMETER help
+.PARAMETER Help
     Displays help information.
 
+.PARAMETER Log
+    Enables verbose logging and dynamic progress display.
+
+.PARAMETER NoIgnore
+    Disables .gitignore processing.
+
+.PARAMETER NoImportTracking
+    Disables module import tracking.
+
+.PARAMETER OutputPath
+    Specifies the output file path.
+
 .EXAMPLE
-    .\DocumentFolderStructure.ps1 --log
+    .\DocumentFolderStructure.ps1 -Log
 
 .NOTES
     Author: Your Name
@@ -30,11 +30,11 @@
 
 [CmdletBinding()]
 param(
-    [switch]$help,
-    [switch]$log,
-    [switch]$noignore,
-    [switch]$noimporttracking,
-    [string]$outputpath
+    [switch]$Help,
+    [switch]$Log,
+    [switch]$NoIgnore,
+    [switch]$NoImportTracking,
+    [string]$OutputPath
 )
 
 # Function to display help information
@@ -43,77 +43,42 @@ function Show-Help {
 Usage: .\DocumentFolderStructure.ps1 [options]
 
 Options:
-  --help                Show this help message and exit.
-  --log                 Enable verbose logging.
-  --noignore            Disable .gitignore processing.
-  --noimporttracking    Disable module import tracking.
-  --outputpath "path"   Specify the output file path.
+  -Help                      Show this help message and exit.
+  -Log                       Enable verbose logging and dynamic progress display.
+  -NoIgnore                  Disable .gitignore processing.
+  -NoImportTracking          Disable module import tracking.
+  -OutputPath "path"         Specify the output file path.
 
 Description:
   This script documents the folder structure of the current repository directory.
-  It considers .gitignore files, tracks module imports in Python and Node.js files,
+  It considers directory entries in the .gitignore file, tracks module imports in Python and Node.js files,
   and outputs the result in markdown format to /documentation/folder_structure.md
   unless an output path is specified.
 
 Examples:
   .\DocumentFolderStructure.ps1
-  .\DocumentFolderStructure.ps1 --noignore --outputpath "C:\output\structure.md"
+  .\DocumentFolderStructure.ps1 -NoIgnore -OutputPath "C:\output\structure.md"
 "@
     Write-Host $helpText
 }
 
-# Function to log messages based on the --log parameter
+# Function to log messages based on the -Log parameter
 function Log-Message {
     param(
         [string]$Message
     )
-    if ($log) {
+    if ($Log) {
         Write-Host $Message
     }
 }
 
-# Function to convert .gitignore patterns to regex
-function Convert-GitIgnorePatternToRegex {
-    param(
-        [string]$Pattern
-    )
-
-    # Escape regex special characters
-    $escapedPattern = [Regex]::Escape($Pattern)
-
-    # Replace escaped '*' with '.*'
-    $escapedPattern = $escapedPattern -replace '\\\*', '.*'
-
-    # Replace escaped '?' with '.'
-    $escapedPattern = $escapedPattern -replace '\\\?', '.'
-
-    # Handle '**' patterns
-    $escapedPattern = $escapedPattern -replace '(\.\*){2,}', '.*'
-
-    # Handle patterns starting with '/'
-    if ($Pattern.StartsWith('/')) {
-        $regexPattern = '^' + $escapedPattern.TrimStart('/')
-    } else {
-        $regexPattern = '(^|.*/)' + $escapedPattern
-    }
-
-    # Patterns ending with '/' should match directories
-    if ($Pattern.EndsWith('/')) {
-        $regexPattern += '(/.*)?$'
-    } else {
-        $regexPattern += '(/.*)?$'
-    }
-
-    return $regexPattern
-}
-
-# Function to parse .gitignore and return patterns with comments
-function Get-GitIgnorePatterns {
+# Function to parse .gitignore and return directory patterns with comments
+function Get-GitIgnoreDirectoryPatterns {
     param(
         [string]$Path
     )
     $patterns = @()
-    $lines = Get-Content $Path
+    $lines = Get-Content $Path -ErrorAction SilentlyContinue
     $currentComment = $null
 
     foreach ($line in $lines) {
@@ -124,35 +89,40 @@ function Get-GitIgnorePatterns {
                 $currentComment = $trimmedLine.TrimStart('#').Trim()
             }
             continue
-        } else {
-            # This is a pattern
-            $regexPattern = Convert-GitIgnorePatternToRegex $trimmedLine
+        } elseif ($trimmedLine.EndsWith('/')) {
+            # This is a directory pattern
             $pattern = @{
-                Pattern = $trimmedLine
-                RegexPattern = $regexPattern
+                DirectoryName = $trimmedLine.TrimEnd('/')
                 Comment = $currentComment
             }
             $patterns += $pattern
             $currentComment = $null
+        } else {
+            # Skip file patterns
+            $currentComment = $null
+            continue
         }
     }
     return $patterns
 }
 
-# Function to check if a file/folder matches a .gitignore pattern
-function MatchesGitIgnorePattern {
+# Function to check if a directory should be ignored
+function Should-IgnoreDirectory {
     param(
-        [System.IO.FileSystemInfo]$Item,
-        [string]$RegexPattern
+        [string]$DirectoryName,
+        [array]$IgnorePatterns
     )
-    # Normalize paths to use '/' as separator
-    $rootPath = (Get-Location).Path
-    $relativePath = $Item.FullName.Substring($rootPath.Length + 1).Replace('\', '/')
-
-    if ([Regex]::IsMatch($relativePath, $RegexPattern)) {
-        return $true
-    } else {
-        return $false
+    foreach ($pattern in $IgnorePatterns) {
+        if ($DirectoryName -ieq $pattern.DirectoryName) {
+            return @{
+                IsIgnored = $true
+                Comment = $pattern.Comment
+            }
+        }
+    }
+    return @{
+        IsIgnored = $false
+        Comment = $null
     }
 }
 
@@ -162,17 +132,22 @@ function Analyze-Imports {
         [string]$FilePath
     )
     $imports = @()
-    $content = Get-Content $FilePath
+    $content = Get-Content $FilePath -ErrorAction SilentlyContinue
+
+    if (!$content) {
+        return $null
+    }
 
     $extension = [System.IO.Path]::GetExtension($FilePath).ToLower()
 
     foreach ($line in $content) {
         if ($extension -eq '.py') {
             # For Python files
-            if ($line -match '^\s*import\s+([^\s]+)') {
-                $importedModule = $matches[1]
-                $imports += $importedModule
-            } elseif ($line -match '^\s*from\s+([^\s]+)\s+import\s+([^\s]+)') {
+            if ($line -match '^\s*import\s+(.+)') {
+                $importedModules = $line -replace '^\s*import\s+', ''
+                $modules = $importedModules -split ',\s*'
+                $imports += $modules
+            } elseif ($line -match '^\s*from\s+([^\s]+)\s+import\s+') {
                 $importedModule = $matches[1]
                 $imports += $importedModule
             }
@@ -191,14 +166,24 @@ function Analyze-Imports {
     # Filter imports to local modules
     $localImports = @()
     foreach ($import in $imports) {
+        # Sanitize the import name
+        $import = $import.Trim()
+
         if ($import.StartsWith('.')) {
             # Relative import
             $localImports += $import
         } else {
             # Check if file exists in the project
-            $possibleModulePath = Join-Path (Split-Path $FilePath -Parent) "$import$extension"
-            if (Test-Path $possibleModulePath) {
-                $localImports += $import
+            try {
+                $parentDir = Split-Path $FilePath -Parent
+                $possibleModulePath = Join-Path $parentDir "$import$extension"
+
+                if (Test-Path -LiteralPath $possibleModulePath) {
+                    $localImports += $import
+                }
+            } catch {
+                # Handle invalid paths
+                continue
             }
         }
     }
@@ -211,14 +196,18 @@ function Analyze-Imports {
     }
 }
 
+# Global counters for dynamic progress display
+$global:FilesCrawled = 0
+$global:DirectoriesCrawled = 0
+
 # Function to recursively get folder structure
 function Get-FolderStructure {
     param(
         [string]$Path,
-        [array]$GitIgnorePatterns,
+        [array]$IgnorePatterns,
         [switch]$NoImportTracking
     )
-    $items = Get-ChildItem -Path $Path -Force
+    $items = Get-ChildItem -Path $Path -Force -ErrorAction SilentlyContinue
 
     $structure = @()
 
@@ -228,51 +217,57 @@ function Get-FolderStructure {
             continue
         }
 
-        # Check if the item matches any .gitignore pattern
-        $isIgnored = $false
-        $matchedComment = $null
-
-        if (-not $noignore -and $GitIgnorePatterns.Count -gt 0) {
-            foreach ($pattern in $GitIgnorePatterns) {
-                if (MatchesGitIgnorePattern -Item $item -RegexPattern $pattern.RegexPattern) {
-                    $isIgnored = $true
-                    $matchedComment = $pattern.Comment
-                    break
+        # Check if the directory should be ignored
+        if ($item.PSIsContainer) {
+            if (-not $NoIgnore -and $IgnorePatterns.Count -gt 0) {
+                $ignoreResult = Should-IgnoreDirectory -DirectoryName $item.Name -IgnorePatterns $IgnorePatterns
+                if ($ignoreResult.IsIgnored) {
+                    # Add the directory to the structure, mark it as ignored, include comment
+                    $entry = @{
+                        Name = $item.Name
+                        IsDirectory = $true
+                        IsIgnored = $true
+                        Comment = $ignoreResult.Comment
+                        Children = @()
+                    }
+                    $structure += $entry
+                    # Do not crawl into this directory
+                    continue
                 }
             }
         }
 
-        if ($isIgnored) {
-            # Include top-level folder/file with comment
-            $structure += @{
-                Name = $item.Name
-                IsDirectory = $item.PSIsContainer
-                IsIgnored = $true
-                Comment = $matchedComment
-                Children = @()
-            }
-        } else {
-            # Include the item and process children if directory
-            $entry = @{
-                Name = $item.Name
-                IsDirectory = $item.PSIsContainer
-                IsIgnored = $false
-                Comment = $null
-                Children = @()
-            }
-
+        # Update progress
+        if ($Log) {
             if ($item.PSIsContainer) {
-                $entry.Children = Get-FolderStructure -Path $item.FullName -GitIgnorePatterns $GitIgnorePatterns -NoImportTracking:$NoImportTracking
+                $global:DirectoriesCrawled++
             } else {
-                # Process import tracking
-                if (-not $NoImportTracking -and ($item.Extension -eq '.py' -or $item.Extension -eq '.js' -or $item.Extension -eq '.ts')) {
-                    $imports = Analyze-Imports -FilePath $item.FullName
-                    $entry.Comment = $imports
-                }
+                $global:FilesCrawled++
             }
-
-            $structure += $entry
+            $progressMessage = "Crawled $global:FilesCrawled files and $global:DirectoriesCrawled directories."
+            Write-Progress -Activity "Processing Files" -Status $progressMessage
         }
+
+        # Include the item and process children if directory
+        $entry = @{
+            Name = $item.Name
+            IsDirectory = $item.PSIsContainer
+            IsIgnored = $false
+            Comment = $null
+            Children = @()
+        }
+
+        if ($item.PSIsContainer) {
+            $entry.Children = Get-FolderStructure -Path $item.FullName -IgnorePatterns $IgnorePatterns -NoImportTracking:$NoImportTracking
+        } else {
+            # Process import tracking
+            if (-not $NoImportTracking -and ($item.Extension -eq '.py' -or $item.Extension -eq '.js' -or $item.Extension -eq '.ts')) {
+                $imports = Analyze-Imports -FilePath $item.FullName
+                $entry.Comment = $imports
+            }
+        }
+
+        $structure += $entry
     }
     return $structure
 }
@@ -290,17 +285,20 @@ function Write-FolderStructure {
         $prefix = $indent + '├── '
         $line = $prefix + $entry.Name
 
-        if ($entry.Comment) {
+        if ($entry.IsIgnored) {
+            if ($entry.Comment) {
+                $line += " #$($entry.Comment)"
+            } else {
+                $line += " #(ignored)"
+            }
+        } elseif ($entry.Comment) {
             $line += " #$($entry.Comment)"
-        } elseif ($entry.IsIgnored -and $entry.Comment) {
-            $line += " #$($entry.Comment)"
-        } elseif ($entry.IsIgnored) {
-            $line += " #(ignored)"
         }
 
         $Writer.WriteLine($line)
 
-        if ($entry.IsDirectory -and $entry.Children.Count -gt 0) {
+        # Only process children if the entry is not ignored
+        if ($entry.IsDirectory -and $entry.Children.Count -gt 0 -and -not $entry.IsIgnored) {
             Write-FolderStructure -Structure $entry.Children -IndentLevel ($IndentLevel + 1) -Writer $Writer
         }
     }
@@ -317,9 +315,11 @@ function Count-FilesAndDirectories {
     foreach ($entry in $Structure) {
         if ($entry.IsDirectory) {
             $dirCount++
-            $childCounts = Count-FilesAndDirectories -Structure $entry.Children
-            $fileCount += $childCounts.FileCount
-            $dirCount += $childCounts.DirCount
+            if (-not $entry.IsIgnored) {
+                $childCounts = Count-FilesAndDirectories -Structure $entry.Children
+                $fileCount += $childCounts.FileCount
+                $dirCount += $childCounts.DirCount
+            }
         } else {
             $fileCount++
         }
@@ -332,22 +332,22 @@ function Count-FilesAndDirectories {
 }
 
 # Main script execution starts here
-if ($help) {
+if ($Help) {
     Show-Help
     exit
 }
 
-$rootPath = Get-Location
+$rootPath = (Get-Location).Path
 $gitignorePath = Join-Path $rootPath '.gitignore'
-$gitignorePatterns = @()
+$ignorePatterns = @()
 
-if (-not $noignore -and (Test-Path $gitignorePath)) {
-    $gitignorePatterns = Get-GitIgnorePatterns -Path $gitignorePath
+if (-not $NoIgnore -and (Test-Path $gitignorePath)) {
+    $ignorePatterns = Get-GitIgnoreDirectoryPatterns -Path $gitignorePath
     Log-Message "Parsed .gitignore file."
 }
 
 Log-Message "Building folder structure..."
-$folderStructure = Get-FolderStructure -Path $rootPath -GitIgnorePatterns $gitignorePatterns -NoImportTracking:$noimporttracking
+$folderStructure = Get-FolderStructure -Path $rootPath -IgnorePatterns $ignorePatterns -NoImportTracking:$NoImportTracking
 
 # Count files and directories
 $counts = Count-FilesAndDirectories -Structure $folderStructure
@@ -357,8 +357,8 @@ $dirsFound = $counts.DirCount
 Write-Host "Found $filesFound files and $dirsFound directories."
 
 # Determine output path
-if ($outputpath) {
-    $outputFile = $outputpath
+if ($OutputPath) {
+    $outputFile = $OutputPath
 } else {
     # Search for 'documentation' or 'docs' folder
     $docFolder = Get-ChildItem -Path $rootPath -Directory -Force | Where-Object {
